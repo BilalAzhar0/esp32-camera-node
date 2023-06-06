@@ -13,8 +13,10 @@
 #include "lwip/sys.h"
 #include <sys/param.h>
 #include "esp_netif.h"
+#include "esp_sntp.h"
 #include "esp_tls.h"
 #include "esp_http_client.h"
+#include <time.h>
 
 
 #ifndef portTICK_RATE_MS
@@ -47,7 +49,10 @@
 
 static EventGroupHandle_t s_wifi_event_group;
 
-static const char *TAG = "wifi station";
+static const char *wifi_TAG = "wifi station";
+static const char *http_TAG = "HTTP client";
+static const char *sntp_TAG = "SNTP";
+static const char *cam_TAG = "camera";
 
 static int s_retry_num = 0;
 
@@ -106,7 +111,7 @@ static esp_err_t init_camera(void)
     esp_err_t err = esp_camera_init(&camera_config);
     if (err != ESP_OK)
     {
-        ESP_LOGE(TAG, "Camera Init Failed");
+        ESP_LOGE(wifi_TAG, "Camera Init Failed");
         return err;
     }
 
@@ -124,14 +129,14 @@ static void event_handler(void* arg, esp_event_base_t event_base,
         if (s_retry_num < ESP_WIFI_MAXIMUM_RETRY) {
             esp_wifi_connect();
             s_retry_num++;
-            ESP_LOGI(TAG, "retry to connect to the AP");
+            ESP_LOGI(wifi_TAG, "retry to connect to the AP");
         } else {
             xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
         }
-        ESP_LOGI(TAG,"connect to the AP fail");
+        ESP_LOGI(wifi_TAG,"connect to the AP fail");
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        ESP_LOGI(wifi_TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
@@ -166,7 +171,7 @@ void wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
     ESP_ERROR_CHECK(esp_wifi_start() );
 
-    ESP_LOGI(TAG, "wifi_init_sta finished.");
+    ESP_LOGI(wifi_TAG, "wifi_init_sta finished.");
 
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
             WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
@@ -175,36 +180,36 @@ void wifi_init_sta(void)
             portMAX_DELAY);
 
     if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "connected to ap SSID:%s password:%s",
+        ESP_LOGI(wifi_TAG, "connected to ap SSID:%s password:%s",
                  ESP_WIFI_SSID, ESP_WIFI_PASS);
     } else if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGI(TAG, "Failed to connect to SSID:%s, password:%s",
+        ESP_LOGI(wifi_TAG, "Failed to connect to SSID:%s, password:%s",
                  ESP_WIFI_SSID, ESP_WIFI_PASS);
     } else {
-        ESP_LOGE(TAG, "UNEXPECTED EVENT");
+        ESP_LOGE(wifi_TAG, "UNEXPECTED EVENT");
     }
 }
 
 //********************************** HTTP EVENT HANDLER **********************************//
 esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 {
-    static char *output_buffer;  // Buffer to store response of http request from event handler
-    static int output_len;       // Stores number of bytes read
+    static char *output_buffer; 
+    static int output_len;       
     switch(evt->event_id) {
         case HTTP_EVENT_ERROR:
-            ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
+            ESP_LOGD(http_TAG, "HTTP_EVENT_ERROR");
             break;
         case HTTP_EVENT_ON_CONNECTED:
-            ESP_LOGD(TAG, "HTTP_EVENT_ON_CONNECTED");
+            ESP_LOGD(http_TAG, "HTTP_EVENT_ON_CONNECTED");
             break;
         case HTTP_EVENT_HEADER_SENT:
-            ESP_LOGD(TAG, "HTTP_EVENT_HEADER_SENT");
+            ESP_LOGD(http_TAG, "HTTP_EVENT_HEADER_SENT");
             break;
         case HTTP_EVENT_ON_HEADER:
-            ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+            ESP_LOGD(http_TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
             break;
         case HTTP_EVENT_ON_DATA:
-            ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+            ESP_LOGD(http_TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
             /*
              *  Check for chunked encoding is added as the URL for chunked encoding used in this example returns binary data.
              *  However, event handler can also be used in case chunked encoding is used.
@@ -218,7 +223,7 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
                         output_buffer = (char *) malloc(esp_http_client_get_content_length(evt->client));
                         output_len = 0;
                         if (output_buffer == NULL) {
-                            ESP_LOGE(TAG, "Failed to allocate memory for output buffer");
+                            ESP_LOGE(http_TAG, "Failed to allocate memory for output buffer");
                             return ESP_FAIL;
                         }
                     }
@@ -229,22 +234,21 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 
             break;
         case HTTP_EVENT_ON_FINISH:
-            ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
+            ESP_LOGD(http_TAG, "HTTP_EVENT_ON_FINISH");
             if (output_buffer != NULL) {
-                // Response is accumulated in output_buffer. Uncomment the below line to print the accumulated response
-                // ESP_LOG_BUFFER_HEX(TAG, output_buffer, output_len);
+                ESP_LOG_BUFFER_HEX(http_TAG, output_buffer, output_len);
                 free(output_buffer);
                 output_buffer = NULL;
             }
             output_len = 0;
             break;
         case HTTP_EVENT_DISCONNECTED:
-            ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
+            ESP_LOGI(http_TAG, "HTTP_EVENT_DISCONNECTED");
             int mbedtls_err = 0;
             esp_err_t err = esp_tls_get_and_clear_last_error((esp_tls_error_handle_t)evt->data, &mbedtls_err, NULL);
             if (err != 0) {
-                ESP_LOGI(TAG, "Last esp error code: 0x%x", err);
-                ESP_LOGI(TAG, "Last mbedtls failure: 0x%x", mbedtls_err);
+                ESP_LOGI(http_TAG, "Last esp error code: 0x%x", err);
+                ESP_LOGI(http_TAG, "Last mbedtls failure: 0x%x", mbedtls_err);
             }
             if (output_buffer != NULL) {
                 free(output_buffer);
@@ -253,7 +257,7 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
             output_len = 0;
             break;
         case HTTP_EVENT_REDIRECT:
-            ESP_LOGD(TAG, "HTTP_EVENT_REDIRECT");
+            ESP_LOGD(http_TAG, "HTTP_EVENT_REDIRECT");
             esp_http_client_set_header(evt->client, "From", "user@example.com");
             esp_http_client_set_header(evt->client, "Accept", "text/html");
             esp_http_client_set_redirection(evt->client);
@@ -264,7 +268,7 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 
 
 
-static void http_rest_with_hostname_path(void)
+static void http_image_post(camera_fb_t *pic,char* header)
 {
     esp_http_client_config_t config = {
         .url =  flask_server,
@@ -276,46 +280,66 @@ static void http_rest_with_hostname_path(void)
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
 
-    // // GET
-    // esp_err_t err = esp_http_cli     ent_perform(client);
-    // if (err == ESP_OK) {
-    //     ESP_LOGI(TAG, "HTTP GET Status = %d, content_length = %lld",
-    //             esp_http_client_get_status_code(client),
-    //             esp_http_client_get_content_length(client));
-    // } else {
-    //     ESP_LOGE(TAG, "HTTP GET request failed: %s", esp_err_to_name(err));
-    // }
-
-    // POST
-    ESP_LOGI(TAG, "Taking picture...");
-        camera_fb_t *pic = NULL; 
-        pic = esp_camera_fb_get();
-        
-        // use pic->buf to access the image
-        ESP_LOGI(TAG, "Picture taken! Its size was: %zu bytes", pic->len);
+    esp_http_client_set_header(client,"Filename",header);
+    esp_http_client_set_post_field(client,(char*)pic->buf,pic->len);    
     
     esp_err_t err = esp_http_client_perform(client);
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "HTTP POST Status = %d, content_length = %lld",
+        ESP_LOGI(http_TAG, "HTTP POST Status = %d, content_length = %lld",
                 esp_http_client_get_status_code(client),
                 esp_http_client_get_content_length(client));
     } else {
-        ESP_LOGE(TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
+        ESP_LOGE(http_TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
     }
     esp_camera_fb_return(pic);
-    // //PUT
-    // esp_http_client_set_url(client, "/put");
-    // esp_http_client_set_method(client, HTTP_METHOD_PUT);
-    // err = esp_http_client_perform(client);
-    // if (err == ESP_OK) {
-    //     ESP_LOGI(TAG, "HTTP PUT Status = %d, content_length = %lld",
-    //             esp_http_client_get_status_code(client),
-    //             esp_http_client_get_content_length(client));
-    // } else {
-    //     ESP_LOGE(TAG, "HTTP PUT request failed: %s", esp_err_to_name(err));
-    // }
-
     esp_http_client_cleanup(client);
+}
+
+char* getCurrentTime() {
+    time_t now;
+    time(&now);
+
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    static char time_string[20];
+    strftime(time_string, sizeof(time_string), "%Y-%m-%d-%H-%M-%S", &timeinfo);
+    return time_string;
+}
+char* getNodeID(){
+    uint8_t MAC_ADDRESS[6];
+    esp_wifi_get_mac(ESP_IF_WIFI_STA, MAC_ADDRESS);
+
+    char* sum_string = (char*)malloc(7); 
+    sprintf(sum_string, "%02X%02X%02X", (int)MAC_ADDRESS[3], (int)MAC_ADDRESS[4], (int)MAC_ADDRESS[5]);
+
+    return sum_string;
+}
+void initializeSntp(){
+
+    setenv("TZ", "PKT-5", 1);
+    tzset();
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    sntp_setservername(0, "pool.ntp.org");
+    sntp_init();
+
+    time_t now = 0;
+    struct tm timeinfo = {0};
+    int retry = 0;
+    const int retry_count = 10;
+    while (timeinfo.tm_year < (2020 - 1900) && ++retry < retry_count) {
+        ESP_LOGI(sntp_TAG, "Waiting for system time synchronization... (%d/%d)", retry, retry_count);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        time(&now);
+        localtime_r(&now, &timeinfo);
+    }
+    if (retry >= retry_count) {
+        ESP_LOGE(sntp_TAG, "Time synchronization failed");
+    } else {
+        char time_string[20];
+        strftime(time_string, sizeof(time_string), "%Y-%m-%d %H:%M:%S", &timeinfo);
+        ESP_LOGI(sntp_TAG, "Current time: %s", time_string);
+    }
+
 }
 
 void app_main(void)
@@ -327,9 +351,13 @@ void app_main(void)
       ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-
-    ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
+    ESP_LOGI(wifi_TAG, "ESP_WIFI_MODE_STA");
     wifi_init_sta();
+
+    initializeSntp();
+    
+    char* NODE_ID = getNodeID();
+    free(getNodeID());
 
     #if ESP_CAMERA_SUPPORTED
     if(ESP_OK != init_camera()) {
@@ -337,10 +365,21 @@ void app_main(void)
     }
 
     while (1)
-    {
-        
+    {   
+        char node_time_stamp[27];
+        strcpy(node_time_stamp,NODE_ID);
+        strcat(node_time_stamp, "-");
+        strcat(node_time_stamp,getCurrentTime()); 
 
-        http_rest_with_hostname_path();
+        ESP_LOGI("MAC","time IS :%s",node_time_stamp);
+
+        ESP_LOGI(cam_TAG, "Taking picture...");
+        camera_fb_t *pic = NULL; 
+        pic = esp_camera_fb_get();
+        ESP_LOGI(cam_TAG, "Picture taken! Its size was: %zu bytes", pic->len);
+        
+        http_image_post(pic,node_time_stamp);
+
         vTaskDelay(5000 / portTICK_RATE_MS);
 
 
