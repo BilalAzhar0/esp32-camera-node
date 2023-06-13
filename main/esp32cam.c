@@ -17,12 +17,16 @@
 #include "esp_tls.h"
 #include "esp_http_client.h"
 #include <time.h>
-
+#include "esp_heap_caps.h"
+#include "esp_camera.h"
+#include "driver/gpio.h"
+#include <esp_sleep.h>
 
 #ifndef portTICK_RATE_MS
 #define portTICK_RATE_MS portTICK_PERIOD_MS
 #endif
-#include "esp_camera.h"
+
+#define MOTION_WAKEUP_PIN 0
 
 // #if CONFIG_ESP_WIFI_AUTH_OPEN
 // #define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_OPEN
@@ -45,8 +49,6 @@
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
-
-
 static EventGroupHandle_t s_wifi_event_group;
 
 static const char *wifi_TAG = "wifi station";
@@ -105,6 +107,7 @@ static camera_config_t camera_config = {
     .jpeg_quality = 10, 
     .fb_count = 1,    
     .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
+    //.fb_location = CAMERA_FB_IN_DRAM,
 };
 static esp_err_t init_camera(void)
 {
@@ -118,10 +121,18 @@ static esp_err_t init_camera(void)
     return ESP_OK;
 }
 #endif
-
+//********************************** GPIO CONFIG **********************************//
+void gpio_init(gpio_int_type_t INTR_MODE, gpio_mode_t PIN_MODE , gpio_pull_mode_t PULL_MODE , u_int32_t PIN)
+{
+    gpio_config_t io_config;
+    io_config.intr_type = INTR_MODE;
+    io_config.mode = PIN_MODE;
+    io_config.pull_up_en = PULL_MODE;
+    io_config.pin_bit_mask = 1ULL << PIN;
+    gpio_config(&io_config);
+}
 //********************************** WIFI EVENT HANDLER **********************************//
-static void event_handler(void* arg, esp_event_base_t event_base,
-                                int32_t event_id, void* event_data)
+static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
@@ -189,7 +200,33 @@ void wifi_init_sta(void)
         ESP_LOGE(wifi_TAG, "UNEXPECTED EVENT");
     }
 }
+//********************************** SNTP CONFIGURATION **********************************//
+void initializeSntp()
+{
+    setenv("TZ", "PKT-5", 1);
+    tzset();
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    sntp_setservername(0, "pool.ntp.org");
+    sntp_init();
 
+    time_t now = 0;
+    struct tm timeinfo = {0};
+    int retry = 0;
+    const int retry_count = 10;
+    while (timeinfo.tm_year < (2020 - 1900) && ++retry < retry_count) {
+        ESP_LOGI(sntp_TAG, "Waiting for system time synchronization... (%d/%d)", retry, retry_count);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        time(&now);
+        localtime_r(&now, &timeinfo);
+    }
+    if (retry >= retry_count) {
+        ESP_LOGE(sntp_TAG, "Time synchronization failed");
+    } else {
+        char time_string[20];
+        strftime(time_string, sizeof(time_string), "%Y-%m-%d %H:%M:%S", &timeinfo);
+        ESP_LOGI(sntp_TAG, "Current time: %s", time_string);
+    }
+}
 //********************************** HTTP EVENT HANDLER **********************************//
 esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 {
@@ -265,17 +302,12 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
     }
     return ESP_OK;
 }
-
-
-
+//********************************** HTTP IMAGE POST **********************************//
 static void http_image_post(camera_fb_t *pic,char* header)
 {
     esp_http_client_config_t config = {
         .url =  flask_server,
         .method = HTTP_METHOD_POST,
-        // .host = "192.168.7.179",
-        // .path = "/file",
-        // .transport_type = HTTP_TRANSPORT_OVER_TCP,
         .event_handler = _http_event_handler,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -294,7 +326,7 @@ static void http_image_post(camera_fb_t *pic,char* header)
     esp_camera_fb_return(pic);
     esp_http_client_cleanup(client);
 }
-
+//********************************** GET TIME **********************************//
 char* getCurrentTime() {
     time_t now;
     time(&now);
@@ -305,6 +337,7 @@ char* getCurrentTime() {
     strftime(time_string, sizeof(time_string), "%Y-%m-%d-%H-%M-%S", &timeinfo);
     return time_string;
 }
+//********************************** GET NODE-ID **********************************//
 char* getNodeID(){
     uint8_t MAC_ADDRESS[6];
     esp_wifi_get_mac(ESP_IF_WIFI_STA, MAC_ADDRESS);
@@ -314,33 +347,7 @@ char* getNodeID(){
 
     return sum_string;
 }
-void initializeSntp(){
 
-    setenv("TZ", "PKT-5", 1);
-    tzset();
-    sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    sntp_setservername(0, "pool.ntp.org");
-    sntp_init();
-
-    time_t now = 0;
-    struct tm timeinfo = {0};
-    int retry = 0;
-    const int retry_count = 10;
-    while (timeinfo.tm_year < (2020 - 1900) && ++retry < retry_count) {
-        ESP_LOGI(sntp_TAG, "Waiting for system time synchronization... (%d/%d)", retry, retry_count);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        time(&now);
-        localtime_r(&now, &timeinfo);
-    }
-    if (retry >= retry_count) {
-        ESP_LOGE(sntp_TAG, "Time synchronization failed");
-    } else {
-        char time_string[20];
-        strftime(time_string, sizeof(time_string), "%Y-%m-%d %H:%M:%S", &timeinfo);
-        ESP_LOGI(sntp_TAG, "Current time: %s", time_string);
-    }
-
-}
 
 void app_main(void)
 {
@@ -351,22 +358,30 @@ void app_main(void)
       ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+    
     ESP_LOGI(wifi_TAG, "ESP_WIFI_MODE_STA");
     wifi_init_sta();
 
+    gpio_init(GPIO_INTR_NEGEDGE,GPIO_MODE_INPUT,GPIO_PULLUP_ENABLE,MOTION_WAKEUP_PIN);
+
     initializeSntp();
+
+    esp_sleep_enable_ext0_wakeup(MOTION_WAKEUP_PIN, 0);
+    esp_sleep_enable_timer_wakeup(360000000); //120 seconds to wake up;
     
     char* NODE_ID = getNodeID();
     free(getNodeID());
 
     #if ESP_CAMERA_SUPPORTED
+    size_t freeHeapSize = esp_get_free_heap_size();
+    printf("Free SRAM heap size: %d bytes\n", freeHeapSize);
     if(ESP_OK != init_camera()) {
         return;
     }
 
     while (1)
     {   
-        char node_time_stamp[27];
+        char node_time_stamp[27]; 
         strcpy(node_time_stamp,NODE_ID);
         strcat(node_time_stamp, "-");
         strcat(node_time_stamp,getCurrentTime()); 
@@ -381,6 +396,7 @@ void app_main(void)
         http_image_post(pic,node_time_stamp);
 
         vTaskDelay(5000 / portTICK_RATE_MS);
+        esp_deep_sleep_start();
 
 
     }
