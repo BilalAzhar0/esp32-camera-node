@@ -92,7 +92,7 @@ static camera_config_t camera_config = {
     .jpeg_quality = 10, 
     .fb_count = 1,    
     .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
-    //.fb_location = CAMERA_FB_IN_DRAM,
+    .fb_location = CAMERA_FB_IN_PSRAM,
 };
 static esp_err_t init_camera(void)
 {
@@ -202,7 +202,7 @@ void initializeSntp()
     time_t now = 0;
     struct tm timeinfo = {0};
     int retry = 0;
-    const int retry_count = 10;
+    const int retry_count = 2;
     while (timeinfo.tm_year < (2020 - 1900) && ++retry < retry_count) {
         ESP_LOGI(sntp_TAG, "Waiting for system time synchronization... (%d/%d)", retry, retry_count);
         vTaskDelay(pdMS_TO_TICKS(2000));
@@ -313,7 +313,6 @@ static void http_image_post(camera_fb_t *pic,char* header)
     } else {
         ESP_LOGE(http_TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
     }
-    esp_camera_fb_return(pic);
     esp_http_client_cleanup(client);
 }
 //********************************** GET TIME **********************************//
@@ -338,7 +337,6 @@ char* getNodeID(){
     return sum_string;
 }
 
-
 void app_main(void)
 {
     //Initialize NVS
@@ -348,45 +346,46 @@ void app_main(void)
       ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    gpio_init(GPIO_INTR_NEGEDGE,GPIO_MODE_INPUT,GPIO_PULLUP_ENABLE,MOTION_WAKEUP_PIN);
     
     ESP_LOGI(wifi_TAG, "ESP_WIFI_MODE_STA");
     wifi_init_sta();
-
-    gpio_init(GPIO_INTR_NEGEDGE,GPIO_MODE_INPUT,GPIO_PULLUP_ENABLE,MOTION_WAKEUP_PIN);
+    
+    #if ESP_CAMERA_SUPPORTED
+        if(ESP_OK != init_camera()) {
+        return;
+        }
+    //sensor_t *sensor = esp_camera_sensor_get();
 
     initializeSntp();
 
     esp_sleep_enable_ext0_wakeup(MOTION_WAKEUP_PIN, 0);
-    esp_sleep_enable_timer_wakeup(30000000); //120 seconds to wake up;
+    esp_sleep_enable_timer_wakeup(20000000); //30 seconds to wake up;
     
     char* NODE_ID = getNodeID();
     free(getNodeID());
 
-    #if ESP_CAMERA_SUPPORTED
-    size_t freeHeapSize = esp_get_free_heap_size();
-    printf("Free SRAM heap size: %d bytes\n", freeHeapSize);
-    if(ESP_OK != init_camera()) {
-        return;
-    }
-
-    while (1)
-    {   
+    while(1){
         char node_time_stamp[27]; 
         strcpy(node_time_stamp,NODE_ID);
         strcat(node_time_stamp, "-");
         strcat(node_time_stamp,getCurrentTime()); 
 
         ESP_LOGI("MAC","time IS :%s",node_time_stamp);
-
-        ESP_LOGI(cam_TAG, "Taking picture...");
-        camera_fb_t *pic = NULL; 
-        pic = esp_camera_fb_get();
-        ESP_LOGI(cam_TAG, "Picture taken! Its size was: %zu bytes", pic->len);
         
-        http_image_post(pic,node_time_stamp);
+        for(int i = 0; i <=2; i++){
+            ESP_LOGI(cam_TAG, "Taking picture...");
+            camera_fb_t *pic = NULL; 
+            pic = esp_camera_fb_get();
+            ESP_LOGI(cam_TAG, "Picture taken! Its size was: %zu bytes", pic->len);
+            if(i != 2){esp_camera_fb_return(pic);}
+            else{http_image_post(pic,node_time_stamp);esp_camera_fb_return(pic);}
+        }
+        
 
-        vTaskDelay(5000 / portTICK_RATE_MS);
-        //esp_deep_sleep_start();
+        //vTaskDelay(5000 / portTICK_RATE_MS);
+        esp_deep_sleep_start();
 
 
     }
