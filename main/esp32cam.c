@@ -9,18 +9,18 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "../../data.h"
-#include "lwip/err.h"
-#include "lwip/sys.h"
+//#include "lwip/err.h"
+//#include "lwip/sys.h"
 #include <sys/param.h>
 #include "esp_netif.h"
 #include "esp_sntp.h"
 #include "esp_tls.h"
 #include "esp_http_client.h"
 #include <time.h>
-#include "esp_heap_caps.h"
 #include "esp_camera.h"
 #include "driver/gpio.h"
 #include "esp_sleep.h"
+#include "esp_adc/adc_oneshot.h"
 
 #ifndef portTICK_RATE_MS
 #define portTICK_RATE_MS portTICK_PERIOD_MS
@@ -29,10 +29,16 @@
 #define MOTION_WAKEUP_PIN 0
 
 #define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_PSK
+#define EXAMPLE_ADC_ATTEN ADC_ATTEN_DB_11
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_RETRY_BIT     BIT1
 #define WIFI_FAIL_BIT      BIT2
+
+#define EXAMPLE_ADC1_CHAN0 ADC_CHANNEL_5
+
+static int adc_raw;
+
 static EventGroupHandle_t s_wifi_event_group;
 static TaskHandle_t wifi_retry_task_handle;
 bool wifi_task_flag;
@@ -107,12 +113,13 @@ static esp_err_t init_camera(void)
 }
 #endif
 //********************************** GPIO CONFIG **********************************//
-void gpio_init(gpio_int_type_t INTR_MODE, gpio_mode_t PIN_MODE , gpio_pull_mode_t PULL_MODE , u_int32_t PIN)
+void gpio_init(gpio_int_type_t INTR_MODE, gpio_mode_t PIN_MODE , gpio_pull_mode_t UP_MODE , gpio_pull_mode_t DOWN_MODE, u_int32_t PIN)
 {
     gpio_config_t io_config;
     io_config.intr_type = INTR_MODE;
     io_config.mode = PIN_MODE;
-    io_config.pull_up_en = PULL_MODE;
+    io_config.pull_up_en = UP_MODE;
+    io_config.pull_down_en = DOWN_MODE;
     io_config.pin_bit_mask = 1ULL << PIN;
     gpio_config(&io_config);
 }
@@ -347,22 +354,42 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    gpio_init(GPIO_INTR_NEGEDGE,GPIO_MODE_INPUT,GPIO_PULLUP_ENABLE,MOTION_WAKEUP_PIN);
+    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+
+    if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT1) {
+        printf("Woke up due to GPIO16\n");
+        esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_EXT1);
+        esp_sleep_enable_timer_wakeup(600000000); //10 mins to wake up;
+        esp_deep_sleep_start();
+    }
     
     ESP_LOGI(wifi_TAG, "ESP_WIFI_MODE_STA");
     wifi_init_sta();
-    
+
+    gpio_init(GPIO_INTR_NEGEDGE,GPIO_MODE_INPUT,GPIO_PULLUP_ENABLE,GPIO_PULLDOWN_DISABLE,MOTION_WAKEUP_PIN);
+    esp_sleep_enable_ext1_wakeup(1, 1);
+    esp_sleep_enable_timer_wakeup(3600000000);
+
+    adc_oneshot_unit_handle_t adc1_handle;
+    adc_oneshot_unit_init_cfg_t init_config1 = {
+        .unit_id = ADC_UNIT_1,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
+    adc_oneshot_chan_cfg_t config = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = EXAMPLE_ADC_ATTEN,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, EXAMPLE_ADC1_CHAN0, &config));
+    ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, EXAMPLE_ADC1_CHAN0, &adc_raw));
+    ESP_LOGI("ADC", "Raw ADC: %d", adc_raw);
+
     #if ESP_CAMERA_SUPPORTED
         if(ESP_OK != init_camera()) {
         return;
         }
-    //sensor_t *sensor = esp_camera_sensor_get();
 
     initializeSntp();
 
-    esp_sleep_enable_ext0_wakeup(MOTION_WAKEUP_PIN, 0);
-    esp_sleep_enable_timer_wakeup(20000000); //30 seconds to wake up;
-    
     char* NODE_ID = getNodeID();
     free(getNodeID());
 
@@ -382,8 +409,9 @@ void app_main(void)
             if(i != 2){esp_camera_fb_return(pic);}
             else{http_image_post(pic,node_time_stamp);esp_camera_fb_return(pic);}
         }
-        
-
+    
+        ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, EXAMPLE_ADC1_CHAN0, &adc_raw));
+        ESP_LOGI("ADC", "Raw ADC: %d", adc_raw);
         //vTaskDelay(5000 / portTICK_RATE_MS);
         esp_deep_sleep_start();
 
@@ -391,7 +419,7 @@ void app_main(void)
     }
 #else
     ESP_LOGE(TAG, "Camera support is not available for this chip");
-    return;
+    return; 
 #endif
 
 }
