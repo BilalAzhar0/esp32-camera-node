@@ -21,11 +21,12 @@
 #include "driver/gpio.h"
 #include "esp_sleep.h"
 #include "esp_adc/adc_oneshot.h"
+#include "esp_task_wdt.h"
 
 #ifndef portTICK_RATE_MS
 #define portTICK_RATE_MS portTICK_PERIOD_MS
 #endif
-
+#define LED_PIN 33
 #define MOTION_WAKEUP_PIN 0
 
 #define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_PSK
@@ -113,14 +114,14 @@ static esp_err_t init_camera(void)
 }
 #endif
 //********************************** GPIO CONFIG **********************************//
-void gpio_init(gpio_int_type_t INTR_MODE, gpio_mode_t PIN_MODE , gpio_pull_mode_t UP_MODE , gpio_pull_mode_t DOWN_MODE, u_int32_t PIN)
+void gpio_init(u_int32_t PIN, gpio_mode_t PIN_MODE, gpio_int_type_t INTR_MODE, gpio_pull_mode_t UP_MODE , gpio_pull_mode_t DOWN_MODE)
 {
     gpio_config_t io_config;
-    io_config.intr_type = INTR_MODE;
+    io_config.pin_bit_mask = 1ULL << PIN;
     io_config.mode = PIN_MODE;
     io_config.pull_up_en = UP_MODE;
     io_config.pull_down_en = DOWN_MODE;
-    io_config.pin_bit_mask = 1ULL << PIN;
+    io_config.intr_type = INTR_MODE;
     gpio_config(&io_config);
 }
 //********************************** WIFI RETRY TASK **********************************//
@@ -162,6 +163,7 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
         ESP_LOGI(wifi_TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+
     }
 }
 //********************************** WIFI CONFIGURATION METHOD **********************************//
@@ -330,6 +332,7 @@ char* getCurrentTime() {
     struct tm timeinfo;
     localtime_r(&now, &timeinfo);
     static char time_string[20];
+    //char* time_string = (char*)malloc(20);
     strftime(time_string, sizeof(time_string), "%Y-%m-%d-%H-%M-%S", &timeinfo);
     return time_string;
 }
@@ -344,6 +347,7 @@ char* getNodeID(){
     return sum_string;
 }
 
+
 void app_main(void)
 {
     //Initialize NVS
@@ -354,21 +358,24 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
+
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
 
     if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT1) {
         printf("Woke up due to GPIO16\n");
         esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_EXT1);
-        esp_sleep_enable_timer_wakeup(600000000); //10 mins to wake up;
+        esp_sleep_enable_timer_wakeup(100000); //10 mins to wake up;
         esp_deep_sleep_start();
     }
     
     ESP_LOGI(wifi_TAG, "ESP_WIFI_MODE_STA");
     wifi_init_sta();
-
-    gpio_init(GPIO_INTR_NEGEDGE,GPIO_MODE_INPUT,GPIO_PULLUP_ENABLE,GPIO_PULLDOWN_DISABLE,MOTION_WAKEUP_PIN);
-    esp_sleep_enable_ext1_wakeup(1, 1);
-    esp_sleep_enable_timer_wakeup(3600000000);
+    
+    //gpio_init(LED_PIN, GPIO_MODE_OUTPUT, GPIO_INTR_DISABLE, GPIO_PULLUP_ENABLE, GPIO_PULLDOWN_DISABLE);
+    //gpio_set_level(LED_PIN,0);
+    //gpio_init(MOTION_WAKEUP_PIN, GPIO_MODE_INPUT, GPIO_INTR_NEGEDGE, GPIO_PULLUP_ENABLE, GPIO_PULLDOWN_DISABLE);
+    //esp_sleep_enable_ext1_wakeup(1, 1);
+    esp_sleep_enable_timer_wakeup(1000000);
 
     adc_oneshot_unit_handle_t adc1_handle;
     adc_oneshot_unit_init_cfg_t init_config1 = {
@@ -390,15 +397,24 @@ void app_main(void)
 
     initializeSntp();
 
-    char* NODE_ID = getNodeID();
+    char* NODE_ID = getNodeID(); 
     free(getNodeID());
-
+    char* time = getCurrentTime();
+    ESP_LOGI("TIme","time is : %s", time);
+    
+    
     while(1){
-        char node_time_stamp[27]; 
+    
+        char adc_raw_string[5]; 
+        sprintf(adc_raw_string, "%d", adc_raw);
+        char node_time_stamp[33]; 
         strcpy(node_time_stamp,NODE_ID);
         strcat(node_time_stamp, "-");
-        strcat(node_time_stamp,getCurrentTime()); 
-
+        strcat(node_time_stamp,time);
+        ESP_LOGI("ADC","TIME STAMP %s", time);
+        strcat(node_time_stamp, "-"); 
+        strcat(node_time_stamp, adc_raw_string);
+        
         ESP_LOGI("MAC","time IS :%s",node_time_stamp);
         
         for(int i = 0; i <=2; i++){
@@ -409,10 +425,12 @@ void app_main(void)
             if(i != 2){esp_camera_fb_return(pic);}
             else{http_image_post(pic,node_time_stamp);esp_camera_fb_return(pic);}
         }
-    
-        ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, EXAMPLE_ADC1_CHAN0, &adc_raw));
-        ESP_LOGI("ADC", "Raw ADC: %d", adc_raw);
-        //vTaskDelay(5000 / portTICK_RATE_MS);
+        //gpio_set_level(LED_PIN,0);
+        //vTaskDelay(250 / portTICK_RATE_MS);
+        //gpio_set_level(LED_PIN,1);
+        //vTaskDelay(8000 / portTICK_RATE_MS);
+        ESP_LOGI("SLEEP", "zzzzzz...");
+        //vTaskDelay(8000 / portTICK_RATE_MS);
         esp_deep_sleep_start();
 
 
